@@ -3,7 +3,7 @@ import os
 import tensorflow as tf
 
 
-from .data_utils import minibatches, pad_sequences, get_chunks
+from .data_utils import minibatches, pad_sequences, pad_sequences_rove, get_chunks
 from .general_utils import Progbar
 from .base_model import BaseModel
 
@@ -11,17 +11,29 @@ from .base_model import BaseModel
 class NERModel(BaseModel):
     """Specialized class of Model for NER"""
 
-    def __init__(self, config):
+    def __init__(self, config, is_rove=False, rove_path=None, bme_encoding_size=None):
         super(NERModel, self).__init__(config)
         self.idx_to_tag = {idx: tag for tag, idx in
                            self.config.vocab_tags.items()}
-
+        self.is_rove = is_rove
+        if self.is_rove:
+            assert not self.config.use_chars
+            ckpt = tf.train.get_checkpoint_state(rove_path)
+            self.rove_ckpt = ckpt
+            graph = tf.get_default_graph()
+            self.rove_saver = tf.train.import_meta_graph(ckpt.model_checkpoint_path + '.meta')
+            self.rove_input = graph.get_tensor_by_name('input:0')
+            self.rove_output = graph.get_tensor_by_name('target:0')
+            tf.stop_gradient(self.rove_output)
+            self.bme_encoding_size = bme_encoding_size
 
     def add_placeholders(self):
         """Define placeholders = entries to computational graph"""
         # shape = (batch size, max length of sentence in batch)
-        self.word_ids = tf.placeholder(tf.int32, shape=[None, None],
-                        name="word_ids")
+        if not self.is_rove:
+            self.word_ids = tf.placeholder(tf.int32, shape=[None, None],
+                            name="word_ids")
+        # else self.rove_input is used
 
         # shape = (batch size)
         self.sequence_lengths = tf.placeholder(tf.int32, shape=[None],
@@ -66,20 +78,32 @@ class NERModel(BaseModel):
             word_ids, sequence_lengths = pad_sequences(word_ids, 0)
             char_ids, word_lengths = pad_sequences(char_ids, pad_tok=0,
                 nlevels=2)
+        elif self.is_rove:
+            # word_ids.shape == [batch_size=64, seq_len=32, bme_encoding_size]
+            word_ids, sequence_lengths = pad_sequences_rove(words, self.bme_encoding_size)
         else:
             word_ids, sequence_lengths = pad_sequences(words, 0)
 
-        # build feed dictionary
-        feed = {
-            self.word_ids: word_ids,
-            self.sequence_lengths: sequence_lengths
-        }
+        if not self.is_rove:
+            # build feed dictionary
+            feed = {
+                self.word_ids: word_ids,
+                self.sequence_lengths: sequence_lengths
+            }
+        else:
+            feed = {
+                self.rove_input: word_ids,
+                self.sequence_lengths: sequence_lengths
+            }
 
         if self.config.use_chars:
             feed[self.char_ids] = char_ids
             feed[self.word_lengths] = word_lengths
 
         if labels is not None:
+            if self.is_rove:
+                labels = [l[:32] for l in labels]
+
             labels, _ = pad_sequences(labels, 0)
             feed[self.labels] = labels
 
@@ -91,7 +115,6 @@ class NERModel(BaseModel):
 
         return feed, sequence_lengths
 
-
     def add_word_embeddings_op(self):
         """Defines self.word_embeddings
 
@@ -100,59 +123,60 @@ class NERModel(BaseModel):
         and we don't train the vectors. Otherwise, a random matrix with
         the correct shape is initialized.
         """
-        with tf.variable_scope("words"):
-            if self.config.embeddings is None:
-                self.logger.info("WARNING: randomly initializing word vectors")
-                _word_embeddings = tf.get_variable(
-                        name="_word_embeddings",
-                        dtype=tf.float32,
-                        shape=[self.config.nwords, self.config.dim_word])
-            else:
-                _word_embeddings = tf.Variable(
-                        self.config.embeddings,
-                        name="_word_embeddings",
-                        dtype=tf.float32,
-                        trainable=self.config.train_embeddings)
+        if not self.is_rove:
+            with tf.variable_scope("words"):
+                if self.config.embeddings is None:
+                    self.logger.info("WARNING: randomly initializing word vectors")
+                    _word_embeddings = tf.get_variable(
+                            name="_word_embeddings",
+                            dtype=tf.float32,
+                            shape=[self.config.nwords, self.config.dim_word])
+                else:
+                    _word_embeddings = tf.Variable(
+                            self.config.embeddings,
+                            name="_word_embeddings",
+                            dtype=tf.float32,
+                            trainable=self.config.train_embeddings)
+                word_embeddings = tf.nn.embedding_lookup(_word_embeddings,
+                                                         self.word_ids, name="word_embeddings")
 
-            word_embeddings = tf.nn.embedding_lookup(_word_embeddings,
-                    self.word_ids, name="word_embeddings")
+            with tf.variable_scope("chars"):
+                if self.config.use_chars:
+                    # get char embeddings matrix
+                    _char_embeddings = tf.get_variable(
+                            name="_char_embeddings",
+                            dtype=tf.float32,
+                            shape=[self.config.nchars, self.config.dim_char])
+                    char_embeddings = tf.nn.embedding_lookup(_char_embeddings,
+                            self.char_ids, name="char_embeddings")
 
-        with tf.variable_scope("chars"):
-            if self.config.use_chars:
-                # get char embeddings matrix
-                _char_embeddings = tf.get_variable(
-                        name="_char_embeddings",
-                        dtype=tf.float32,
-                        shape=[self.config.nchars, self.config.dim_char])
-                char_embeddings = tf.nn.embedding_lookup(_char_embeddings,
-                        self.char_ids, name="char_embeddings")
+                    # put the time dimension on axis=1
+                    s = tf.shape(char_embeddings)
+                    char_embeddings = tf.reshape(char_embeddings,
+                            shape=[s[0]*s[1], s[-2], self.config.dim_char])
+                    word_lengths = tf.reshape(self.word_lengths, shape=[s[0]*s[1]])
 
-                # put the time dimension on axis=1
-                s = tf.shape(char_embeddings)
-                char_embeddings = tf.reshape(char_embeddings,
-                        shape=[s[0]*s[1], s[-2], self.config.dim_char])
-                word_lengths = tf.reshape(self.word_lengths, shape=[s[0]*s[1]])
+                    # bi lstm on chars
+                    cell_fw = tf.contrib.rnn.LSTMCell(self.config.hidden_size_char,
+                            state_is_tuple=True)
+                    cell_bw = tf.contrib.rnn.LSTMCell(self.config.hidden_size_char,
+                            state_is_tuple=True)
+                    _output = tf.nn.bidirectional_dynamic_rnn(
+                            cell_fw, cell_bw, char_embeddings,
+                            sequence_length=word_lengths, dtype=tf.float32)
 
-                # bi lstm on chars
-                cell_fw = tf.contrib.rnn.LSTMCell(self.config.hidden_size_char,
-                        state_is_tuple=True)
-                cell_bw = tf.contrib.rnn.LSTMCell(self.config.hidden_size_char,
-                        state_is_tuple=True)
-                _output = tf.nn.bidirectional_dynamic_rnn(
-                        cell_fw, cell_bw, char_embeddings,
-                        sequence_length=word_lengths, dtype=tf.float32)
+                    # read and concat output
+                    _, ((_, output_fw), (_, output_bw)) = _output
+                    output = tf.concat([output_fw, output_bw], axis=-1)
 
-                # read and concat output
-                _, ((_, output_fw), (_, output_bw)) = _output
-                output = tf.concat([output_fw, output_bw], axis=-1)
+                    # shape = (batch size, max sentence length, char hidden size)
+                    output = tf.reshape(output,
+                            shape=[s[0], s[1], 2*self.config.hidden_size_char])
+                    word_embeddings = tf.concat([word_embeddings, output], axis=-1)
 
-                # shape = (batch size, max sentence length, char hidden size)
-                output = tf.reshape(output,
-                        shape=[s[0], s[1], 2*self.config.hidden_size_char])
-                word_embeddings = tf.concat([word_embeddings, output], axis=-1)
-
-        self.word_embeddings =  tf.nn.dropout(word_embeddings, self.dropout)
-
+            self.word_embeddings = tf.nn.dropout(word_embeddings, self.dropout)
+        else:
+            self.word_embeddings = self.rove_output
 
     def add_logits_op(self):
         """Defines self.logits
@@ -181,7 +205,6 @@ class NERModel(BaseModel):
             pred = tf.matmul(output, W) + b
             self.logits = tf.reshape(pred, [-1, nsteps, self.config.ntags])
 
-
     def add_pred_op(self):
         """Defines self.labels_pred
 
@@ -194,7 +217,6 @@ class NERModel(BaseModel):
         if not self.config.use_crf:
             self.labels_pred = tf.cast(tf.argmax(self.logits, axis=-1),
                     tf.int32)
-
 
     def add_loss_op(self):
         """Defines the loss"""
@@ -213,7 +235,6 @@ class NERModel(BaseModel):
         # for tensorboard
         tf.summary.scalar("loss", self.loss)
 
-
     def build(self):
         # NER specific functions
         self.add_placeholders()
@@ -225,8 +246,9 @@ class NERModel(BaseModel):
         # Generic functions that add training op and initialize session
         self.add_train_op(self.config.lr_method, self.lr, self.loss,
                 self.config.clip)
-        self.initialize_session() # now self.sess is defined and vars are init
-
+        self.initialize_session()  # now self.sess is defined and vars are init
+        if self.is_rove:
+            self.rove_saver.restore(self.sess, self.rove_ckpt.model_checkpoint_path)
 
     def predict_batch(self, words):
         """
@@ -248,7 +270,9 @@ class NERModel(BaseModel):
 
             # iterate over the sentences because no batching in vitervi_decode
             for logit, sequence_length in zip(logits, sequence_lengths):
-                logit = logit[:sequence_length] # keep only the valid steps
+                assert logit is not None
+                assert sequence_length is not None
+                logit = logit[:sequence_length]  # keep only the valid steps
                 viterbi_seq, viterbi_score = tf.contrib.crf.viterbi_decode(
                         logit, trans_params)
                 viterbi_sequences += [viterbi_seq]
@@ -260,6 +284,37 @@ class NERModel(BaseModel):
 
             return labels_pred, sequence_lengths
 
+    def train(self, train, dev):
+        """Performs training with early stopping and lr exponential decay
+
+        Args:
+            train: dataset that yields tuple of (sentences, tags)
+            dev: dataset
+
+        """
+        best_score = 0
+        nepoch_no_imprv = 0 # for early stopping
+        self.add_summary() # tensorboard
+
+        for epoch in range(self.config.nepochs):
+            self.logger.info("Epoch {:} out of {:}".format(epoch + 1,
+                        self.config.nepochs))
+
+            score = self.run_epoch(train, dev, epoch)
+            self.config.lr *= self.config.lr_decay # decay learning rate
+
+            # early stopping and saving best parameters
+            if score >= best_score:
+                nepoch_no_imprv = 0
+                self.save_session()
+                best_score = score
+                self.logger.info("- new best score!")
+            else:
+                nepoch_no_imprv += 1
+                if nepoch_no_imprv >= self.config.nepoch_no_imprv:
+                    self.logger.info("- early stopping {} epochs without "\
+                            "improvement".format(nepoch_no_imprv))
+                    break
 
     def run_epoch(self, train, dev, epoch):
         """Performs one complete pass over the train set and evaluate on dev
@@ -299,7 +354,6 @@ class NERModel(BaseModel):
 
         return metrics["f1"]
 
-
     def run_evaluate(self, test):
         """Evaluates performance on test set
 
@@ -310,6 +364,7 @@ class NERModel(BaseModel):
             metrics: (dict) metrics["acc"] = 98.4, ...
 
         """
+        # TODO: chunkwise F1
         accs = []
         correct_preds, total_correct, total_preds = 0., 0., 0.
         for words, labels in minibatches(test, self.config.batch_size):
@@ -335,7 +390,6 @@ class NERModel(BaseModel):
         acc = np.mean(accs)
 
         return {"acc": 100*acc, "f1": 100*f1}
-
 
     def predict(self, words_raw):
         """Returns list of tags

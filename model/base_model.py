@@ -101,39 +101,8 @@ class BaseModel(object):
         self.file_writer = tf.summary.FileWriter(self.config.dir_output,
                 self.sess.graph)
 
-
     def train(self, train, dev):
-        """Performs training with early stopping and lr exponential decay
-
-        Args:
-            train: dataset that yields tuple of (sentences, tags)
-            dev: dataset
-
-        """
-        best_score = 0
-        nepoch_no_imprv = 0 # for early stopping
-        self.add_summary() # tensorboard
-
-        for epoch in range(self.config.nepochs):
-            self.logger.info("Epoch {:} out of {:}".format(epoch + 1,
-                        self.config.nepochs))
-
-            score = self.run_epoch(train, dev, epoch)
-            self.config.lr *= self.config.lr_decay # decay learning rate
-
-            # early stopping and saving best parameters
-            if score >= best_score:
-                nepoch_no_imprv = 0
-                self.save_session()
-                best_score = score
-                self.logger.info("- new best score!")
-            else:
-                nepoch_no_imprv += 1
-                if nepoch_no_imprv >= self.config.nepoch_no_imprv:
-                    self.logger.info("- early stopping {} epochs without "\
-                            "improvement".format(nepoch_no_imprv))
-                    break
-
+        raise NotImplementedError
 
     def evaluate(self, test):
         """Evaluate model on test set
@@ -147,3 +116,4 @@ class BaseModel(object):
         msg = " - ".join(["{} {:04.2f}".format(k, v)
                 for k, v in metrics.items()])
         self.logger.info(msg)
+        return metrics

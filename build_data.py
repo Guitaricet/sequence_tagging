@@ -21,7 +21,8 @@ def main():
     """
     # get config and processing of words
     config = Config(load=False)
-    processing_word = get_processing_word(lowercase=True)
+    # processing_word = get_processing_word(lowercase=True)
+    processing_word = None
 
     # Generators
     dev   = CoNLLDataset(config.filename_dev, processing_word)
@@ -30,20 +31,20 @@ def main():
 
     # Build Word and Tag vocab
     vocab_words, vocab_tags = get_vocabs([train, dev, test])
-    vocab_glove = get_glove_vocab(config.filename_glove)
-
-    vocab = vocab_words & vocab_glove
-    vocab.add(UNK)
-    vocab.add(NUM)
+    # vocab_glove = get_glove_vocab(config.filename_glove)
+    #
+    # vocab = vocab_words & vocab_glove
+    # vocab.add(UNK)
+    # vocab.add(NUM)
 
     # Save vocab
-    write_vocab(vocab, config.filename_words)
+    # write_vocab(vocab, config.filename_words)
     write_vocab(vocab_tags, config.filename_tags)
 
-    # Trim GloVe Vectors
-    vocab = load_vocab(config.filename_words)
-    export_trimmed_glove_vectors(vocab, config.filename_glove,
-                                config.filename_trimmed, config.dim_word)
+    # # Trim GloVe Vectors
+    # vocab = load_vocab(config.filename_words)
+    # export_trimmed_glove_vectors(vocab, config.filename_glove,
+    #                             config.filename_trimmed, config.dim_word)
 
     # Build and save char vocab
     train = CoNLLDataset(config.filename_train)

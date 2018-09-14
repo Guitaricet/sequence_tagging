@@ -26,7 +26,6 @@ class Config():
         if load:
             self.load()
 
-
     def load(self):
         """Loads vocabulary, processing functions and embeddings
 
@@ -36,23 +35,25 @@ class Config():
 
         """
         # 1. vocabulary
-        self.vocab_words = load_vocab(self.filename_words)
+        # self.vocab_words = load_vocab(self.filename_words)
         self.vocab_tags  = load_vocab(self.filename_tags)
         self.vocab_chars = load_vocab(self.filename_chars)
 
-        self.nwords     = len(self.vocab_words)
+        # self.nwords     = len(self.vocab_words)
         self.nchars     = len(self.vocab_chars)
         self.ntags      = len(self.vocab_tags)
 
         # 2. get processing functions that map str -> id
-        self.processing_word = get_processing_word(self.vocab_words,
-                self.vocab_chars, lowercase=True, chars=self.use_chars)
+        # self.processing_word = get_processing_word(self.vocab_words,
+        #         self.vocab_chars, lowercase=True, chars=self.use_chars)
+        self.processing_word = None
         self.processing_tag  = get_processing_word(self.vocab_tags,
                 lowercase=False, allow_unk=False)
 
         # 3. get pre-trained embeddings
-        self.embeddings = (get_trimmed_glove_vectors(self.filename_trimmed)
-                if self.use_pretrained else None)
+        self.embeddings = None
+        # self.embeddings = (get_trimmed_glove_vectors(self.filename_trimmed)
+        #         if self.use_pretrained else None)
 
 
     # general config
@@ -88,10 +89,10 @@ class Config():
     train_embeddings = False
     nepochs          = 15
     dropout          = 0.5
-    batch_size       = 20
+    batch_size       = 64
     lr_method        = "adam"
-    lr               = 0.001
-    lr_decay         = 0.9
+    lr               = 0.005
+    lr_decay         = 0.707
     clip             = -1 # if negative, no clipping
     nepoch_no_imprv  = 3
 

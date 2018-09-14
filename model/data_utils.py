@@ -1,4 +1,5 @@
 import numpy as np
+import random
 import os
 
 
@@ -38,10 +39,10 @@ class CoNLLDataset(object):
         for sentence, tags in data:
             pass
         ```
-
     """
+
     def __init__(self, filename, processing_word=None, processing_tag=None,
-                 max_iter=None):
+                 max_iter=None, noise_level=0, char_vocab=None, split_by=' '):
         """
         Args:
             filename: path to the file
@@ -50,12 +51,22 @@ class CoNLLDataset(object):
             max_iter: (optional) max number of sentences to yield
 
         """
+        if noise_level > 0:
+            assert char_vocab is not None, 'char_vocab is required'
+
         self.filename = filename
         self.processing_word = processing_word
+        if processing_word is not None:
+            raise NotImplementedError
         self.processing_tag = processing_tag
         self.max_iter = max_iter
         self.length = None
-
+        self.noise_level = noise_level
+        self.char_vocab = char_vocab
+        if char_vocab is not None:
+            self.alphabet = list(char_vocab.keys())
+            self.alphabet = [c for c in self.alphabet if c != '']
+        self.split_by = split_by
 
     def __iter__(self):
         niter = 0
@@ -63,7 +74,7 @@ class CoNLLDataset(object):
             words, tags = [], []
             for line in f:
                 line = line.strip()
-                if (len(line) == 0 or line.startswith("-DOCSTART-")):
+                if len(line) == 0 or line.startswith("-DOCSTART-"):
                     if len(words) != 0:
                         niter += 1
                         if self.max_iter is not None and niter > self.max_iter:
@@ -71,8 +82,15 @@ class CoNLLDataset(object):
                         yield words, tags
                         words, tags = [], []
                 else:
-                    ls = line.split(' ')
-                    word, tag = ls[0],ls[-1]
+                    ls = line.split(self.split_by)
+                    word, tag = ls[0], ls[-1]
+
+                    if self.noise_level > 0:
+                        assert len(word) > 0, '1'
+                        word = self._noise_generator(word)
+                        assert len(word) > 0
+                        word = self._letters2vec(word)
+
                     if self.processing_word is not None:
                         word = self.processing_word(word)
                     if self.processing_tag is not None:
@@ -80,6 +98,47 @@ class CoNLLDataset(object):
                     words += [word]
                     tags += [tag]
 
+    def _letters2vec(self, word, dtype=np.uint8):
+        vocab = self.char_vocab
+        base = np.zeros(len(vocab), dtype=dtype)
+
+        def update_vector(vector, char):
+            if char in vocab:
+                vector[vocab.get(char, 0)] += 1
+
+        middle = np.copy(base)
+        for char in word:
+            update_vector(middle, char)
+
+        first = np.copy(base)
+        update_vector(first, word[0])
+        second = np.copy(base)
+        if len(word) > 1:
+            update_vector(second, word[1])
+        third = np.copy(base)
+        if len(word) > 2:
+            update_vector(third, word[2])
+
+        end_first = np.copy(base)
+        update_vector(end_first, word[-1])
+        end_second = np.copy(base)
+        if len(word) > 1:
+            update_vector(end_second, word[-2])
+        end_third = np.copy(base)
+        if len(word) > 2:
+            update_vector(end_third, word[-3])
+
+        return np.concatenate([first, second, third, middle, end_third, end_second, end_first])
+
+    def _noise_generator(self, string):
+        assert isinstance(string, str)
+        noised = ""
+        for c in string:
+            if random.random() > self.noise_level:
+                noised += c
+            else:
+                noised += random.choice(self.alphabet)
+        return noised
 
     def __len__(self):
         """Iterates once over the corpus to set and store length"""
@@ -338,6 +397,18 @@ def pad_sequences(sequences, pad_tok, nlevels=1):
     return sequence_padded, sequence_length
 
 
+def pad_sequences_rove(sequences, bme_encoding_size):
+    max_seq_len = 32  # rove limitation
+    batch_size = 64
+    padded = np.zeros([batch_size, max_seq_len, bme_encoding_size])
+    lengths = np.zeros([batch_size], dtype=np.int8)
+    for i, sequence in enumerate(sequences):
+        _length = min(len(sequence), max_seq_len)
+        padded[i, :_length] = np.array(sequence[:_length])
+        lengths[i] = _length
+    return padded, lengths
+
+
 def minibatches(data, minibatch_size):
     """
     Args:
@@ -359,8 +430,8 @@ def minibatches(data, minibatch_size):
         x_batch += [x]
         y_batch += [y]
 
-    if len(x_batch) != 0:
-        yield x_batch, y_batch
+    # if len(x_batch) != 0:
+    #     yield x_batch, y_batch
 
 
 def get_chunk_type(tok, idx_to_tag):
